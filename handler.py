@@ -27,6 +27,8 @@ os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("HF_HOME", "/workspace/.cache/huggingface")
 
 LORA_PATH = Path("/app/loras/dark-ghibli-fairytales.safetensors")
+PONYPLEX_CACHE = Path("/workspace/checkpoints/ponyplex_v10.safetensors")
+PONYPLEX_DOWNLOAD_URL = "https://civitai.com/api/download/models/436407"
 
 # Per-process pipeline cache so a worker handling many requests doesn't reload.
 _PIPELINE_CACHE: dict[str, object] = {}
@@ -48,6 +50,39 @@ def _read_lora_with_synthetic_alphas(path: Path) -> dict:
         if base + ".alpha" not in state_dict:
             state_dict[base + ".alpha"] = torch.tensor(float(state_dict[key].shape[0]))
     return state_dict
+
+
+def _download_ponyplex():
+    """Lazy-download PonyPlex from CivitAI on first request. Cached to
+    /workspace/checkpoints/ which persists for the worker's lifetime.
+
+    CloudFlare WAF in front of civitai.com fingerprints Python TLS clients
+    (urllib + requests both) and 403s them on datacenter IP ranges. curl
+    uses a TLS profile CloudFlare permits, so shell out rather than fight
+    the WAF in-process.
+    """
+    if PONYPLEX_CACHE.exists() and PONYPLEX_CACHE.stat().st_size > 1_000_000_000:
+        return
+    PONYPLEX_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    token = os.environ.get("CIVITAI_TOKEN", "")
+    if not token:
+        raise RuntimeError("CIVITAI_TOKEN env var not set on endpoint config")
+    sep = "&" if "?" in PONYPLEX_DOWNLOAD_URL else "?"
+    auth_url = f"{PONYPLEX_DOWNLOAD_URL}{sep}token={token}"
+    print(f"[handler] downloading PonyPlex from {PONYPLEX_DOWNLOAD_URL} (via curl) …", flush=True)
+    t0 = time.perf_counter()
+    import subprocess
+    tmp = PONYPLEX_CACHE.with_suffix(".tmp")
+    result = subprocess.run(
+        ["curl", "-fsSL", "--retry", "3", "--retry-delay", "5",
+         "--max-time", "600", "-o", str(tmp), auth_url],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"curl failed (rc={result.returncode}): {result.stderr.strip()[:300]}")
+    tmp.replace(PONYPLEX_CACHE)
+    size_gb = PONYPLEX_CACHE.stat().st_size / (1 << 30)
+    print(f"[handler] PonyPlex downloaded ({size_gb:.1f} GB) in {time.perf_counter() - t0:.1f}s", flush=True)
 
 
 def _load_sdxl_dark_ghibli(lora_scale: float):
@@ -77,6 +112,41 @@ def _load_sdxl_dark_ghibli(lora_scale: float):
     pipe.enable_vae_slicing()
     pipe.enable_vae_tiling()
     print(f"[handler] SDXL ready in {time.perf_counter() - t0:.1f}s", flush=True)
+    return pipe
+
+
+def _load_ponyplex():
+    """PonyPlex: a fine-tune of Pony Diffusion v6 (CivitAI baseModel=Pony).
+
+    The actual missing piece from prior attempts wasn't text-encoder layout or
+    VAE precision — it was CLIP-skip. Pony Diffusion was trained with CLIP-
+    skip 2 (use the penultimate text-encoder layer's hidden state, not the
+    final one). Diffusers defaults to CLIP-skip 1, so the UNet was being fed
+    embeddings from the wrong layer and produced noise regardless of prompt.
+
+    The clip_skip=2 setting belongs on the pipeline __call__ (not the loader)
+    — see the handler's inference call. The loader just needs to NOT inject
+    SDXL-base text encoders, so Pony's bundled (booru-trained) ones get used.
+    The fp16-fix VAE remains; SDXL latents from any Pony-derived UNet still
+    overflow under the default VAE in fp16.
+    """
+    from diffusers import StableDiffusionXLPipeline, AutoencoderKL
+    _download_ponyplex()
+    print("[handler] loading PonyPlex (bundled Pony text encoders + fp16-fix VAE) …", flush=True)
+    t0 = time.perf_counter()
+    vae = AutoencoderKL.from_pretrained(
+        "madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16,
+    )
+    pipe = StableDiffusionXLPipeline.from_single_file(
+        str(PONYPLEX_CACHE),
+        torch_dtype=torch.float16,
+        use_safetensors=True,
+        vae=vae,
+    )
+    pipe = pipe.to("cuda")
+    pipe.enable_vae_slicing()
+    pipe.enable_vae_tiling()
+    print(f"[handler] PonyPlex ready in {time.perf_counter() - t0:.1f}s", flush=True)
     return pipe
 
 
@@ -116,6 +186,8 @@ def get_pipeline(model: str, lora_scale: float):
         pipe = _load_sdxl_dark_ghibli(lora_scale)
     elif model == "juggernaut-xl":
         pipe = _load_juggernaut_xl()
+    elif model == "ponyplex":
+        pipe = _load_ponyplex()
     else:
         raise ValueError(f"unknown model: {model!r}")
     _PIPELINE_CACHE[key] = pipe
@@ -132,7 +204,8 @@ def handler(event):
         "guidance": float,      # default 7.0 (SDXL default; works for both models)
         "width": int, "height": int,
         "seed": int,
-        "model": "sdxl-dark-ghibli" | "juggernaut-xl",
+        "model": "sdxl-dark-ghibli" | "juggernaut-xl" | "ponyplex",
+        "clip_skip": int (optional),  # auto: 2 for ponyplex, None otherwise
         "lora_scale": float,    # default 0.9 (SDXL+DG only)
       }
     Output:
@@ -158,16 +231,24 @@ def handler(event):
         height = int(inp.get("height", 1024))
         seed = int(inp.get("seed", 0))
         lora_scale = float(inp.get("lora_scale", 0.9))
+        # CLIP-skip: explicit input override wins, else default by model.
+        # Pony Diffusion and its fine-tunes (PonyPlex) were trained with
+        # clip_skip=2 — penultimate text-encoder layer. Diffusers default is 1.
+        if "clip_skip" in inp:
+            clip_skip = int(inp["clip_skip"])
+        elif model == "ponyplex":
+            clip_skip = 2
+        else:
+            clip_skip = None
 
-        # SDXL prefers multiples of 64; both checkpoints use SDXL architecture.
+        # SDXL prefers multiples of 64; all checkpoints use SDXL architecture.
         width = max(384, min(2048, (width // 64) * 64))
         height = max(384, min(2048, (height // 64) * 64))
 
         pipe = get_pipeline(model, lora_scale)
         generator = torch.Generator(device="cuda").manual_seed(seed)
 
-        t0 = time.perf_counter()
-        result = pipe(
+        call_kwargs = dict(
             prompt=prompt,
             negative_prompt=negative,
             num_inference_steps=steps,
@@ -176,6 +257,11 @@ def handler(event):
             height=height,
             generator=generator,
         )
+        if clip_skip is not None:
+            call_kwargs["clip_skip"] = clip_skip
+
+        t0 = time.perf_counter()
+        result = pipe(**call_kwargs)
         image = result.images[0]
         elapsed = time.perf_counter() - t0
 

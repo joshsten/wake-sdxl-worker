@@ -3,17 +3,13 @@ RunPod Serverless handler — Wake codex SDXL worker.
 
 Two checkpoints supported via input.model:
   - "sdxl-dark-ghibli"  → SDXL base + Dark Ghibli Fairytales LoRA (baked in)
-  - "ponyplex"          → PonyPlex Pony-XL checkpoint (lazy-loaded from CivitAI
-                          on first request, cached to /workspace for the
-                          lifetime of the worker)
+  - "juggernaut-xl"     → Juggernaut-XL v9 from RunDiffusion (HuggingFace
+                          from_pretrained on first request, cached to
+                          /workspace via HF_HOME for the worker's lifetime)
 
-Models are downloaded at first use rather than baked into the image, so the
-container stays small (~3 GB compressed) and pushes/pulls quickly. Each worker
-pays the cold-start cost once (~3–5 min for SDXL base, ~3 min for PonyPlex),
-then stays warm.
-
-Required env vars on the RunPod endpoint config:
-  CIVITAI_TOKEN — auth token for downloading PonyPlex from civitai.com
+Models load at first use rather than at image build, so the container stays
+small (~3 GB compressed). Each worker pays the cold-start cost once (~3–5 min
+for SDXL base, ~3 min for Juggernaut), then stays warm.
 """
 from __future__ import annotations
 
@@ -31,8 +27,6 @@ os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("HF_HOME", "/workspace/.cache/huggingface")
 
 LORA_PATH = Path("/app/loras/dark-ghibli-fairytales.safetensors")
-PONYPLEX_CACHE = Path("/workspace/checkpoints/ponyplex_v10.safetensors")
-PONYPLEX_DOWNLOAD_URL = "https://civitai.com/api/download/models/436407"
 
 # Per-process pipeline cache so a worker handling many requests doesn't reload.
 _PIPELINE_CACHE: dict[str, object] = {}
@@ -54,38 +48,6 @@ def _read_lora_with_synthetic_alphas(path: Path) -> dict:
         if base + ".alpha" not in state_dict:
             state_dict[base + ".alpha"] = torch.tensor(float(state_dict[key].shape[0]))
     return state_dict
-
-
-def _download_ponyplex():
-    """Lazy-download PonyPlex from CivitAI on first request. Cached to
-    /workspace/checkpoints/ which persists for the worker's lifetime."""
-    if PONYPLEX_CACHE.exists() and PONYPLEX_CACHE.stat().st_size > 1_000_000_000:
-        return  # already present
-    PONYPLEX_CACHE.parent.mkdir(parents=True, exist_ok=True)
-    token = os.environ.get("CIVITAI_TOKEN", "")
-    if not token:
-        raise RuntimeError("CIVITAI_TOKEN env var not set on endpoint config")
-    # CloudFlare WAF in front of civitai.com blocks Python clients (urllib +
-    # requests) based on TLS fingerprint (JA3), regardless of User-Agent.
-    # Bot detection is more aggressive on datacenter IP ranges like RunPod's.
-    # curl works because its TLS handshake matches "real client" patterns.
-    # Shell out to curl rather than fight the WAF in Python.
-    sep = "&" if "?" in PONYPLEX_DOWNLOAD_URL else "?"
-    auth_url = f"{PONYPLEX_DOWNLOAD_URL}{sep}token={token}"
-    print(f"[handler] downloading PonyPlex from {PONYPLEX_DOWNLOAD_URL} (via curl) …", flush=True)
-    t0 = time.perf_counter()
-    import subprocess
-    tmp = PONYPLEX_CACHE.with_suffix(".tmp")
-    result = subprocess.run(
-        ["curl", "-fsSL", "--retry", "3", "--retry-delay", "5",
-         "--max-time", "600", "-o", str(tmp), auth_url],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"curl failed (rc={result.returncode}): {result.stderr.strip()[:300]}")
-    tmp.replace(PONYPLEX_CACHE)
-    size_gb = PONYPLEX_CACHE.stat().st_size / (1 << 30)
-    print(f"[handler] PonyPlex downloaded ({size_gb:.1f} GB) in {time.perf_counter() - t0:.1f}s", flush=True)
 
 
 def _load_sdxl_dark_ghibli(lora_scale: float):
@@ -118,39 +80,31 @@ def _load_sdxl_dark_ghibli(lora_scale: float):
     return pipe
 
 
-def _load_ponyplex():
-    """PonyPlex single-file checkpoint.
+def _load_juggernaut_xl():
+    """Juggernaut-XL v9 from the RunDiffusion HuggingFace mirror.
 
-    Per the model author's CivitAI page, PonyPlex is a fine-tune of
-    Pony Diffusion v6 (baseModel: Pony), NOT vanilla SDXL. Pony Diffusion's
-    text encoders were retrained extensively against booru-tag captions —
-    using SDXL-base text encoders here produces noise because the UNet
-    expects Pony-tuned text embeddings and gets SDXL ones instead.
-
-    Therefore: let from_single_file load PonyPlex's bundled text encoders.
-    The pinned transformers==4.46.3 + diffusers==0.31.0 combination can
-    handle the .text_model layout, which it couldn't on newer transformers.
-
-    The fp16-fix VAE remains: SDXL latents from any Pony-derived UNet still
-    overflow when decoded by the default VAE in fp16.
+    Replaces the PonyPlex path entirely: PonyPlex's CivitAI single-file
+    checkpoint never round-tripped cleanly through diffusers' from_single_file
+    (7 worker iterations of debugging — text encoder layout, VAE overflow,
+    Pony-vs-SDXL text-encoder base, none of it produced coherent output).
+    Juggernaut-XL ships a proper from_pretrained tree on HF with text_encoder,
+    text_encoder_2, unet, vae, and tokenizers as separate folders, so the
+    standard SDXL loader picks everything up natively — no schema guesswork.
+    Painterly-realistic register, contrasts cleanly against Dark Ghibli.
     """
-    from diffusers import StableDiffusionXLPipeline, AutoencoderKL
-    _download_ponyplex()
-    print("[handler] loading PonyPlex (bundled Pony text encoders + fp16-fix VAE) …", flush=True)
+    from diffusers import StableDiffusionXLPipeline
+    print("[handler] loading Juggernaut-XL v9 from HF …", flush=True)
     t0 = time.perf_counter()
-    vae = AutoencoderKL.from_pretrained(
-        "madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16,
-    )
-    pipe = StableDiffusionXLPipeline.from_single_file(
-        str(PONYPLEX_CACHE),
+    pipe = StableDiffusionXLPipeline.from_pretrained(
+        "RunDiffusion/Juggernaut-XL-v9",
         torch_dtype=torch.float16,
+        variant="fp16",
         use_safetensors=True,
-        vae=vae,
     )
     pipe = pipe.to("cuda")
     pipe.enable_vae_slicing()
     pipe.enable_vae_tiling()
-    print(f"[handler] PonyPlex ready in {time.perf_counter() - t0:.1f}s", flush=True)
+    print(f"[handler] Juggernaut-XL ready in {time.perf_counter() - t0:.1f}s", flush=True)
     return pipe
 
 
@@ -160,8 +114,8 @@ def get_pipeline(model: str, lora_scale: float):
         return _PIPELINE_CACHE[key]
     if model == "sdxl-dark-ghibli":
         pipe = _load_sdxl_dark_ghibli(lora_scale)
-    elif model == "ponyplex":
-        pipe = _load_ponyplex()
+    elif model == "juggernaut-xl":
+        pipe = _load_juggernaut_xl()
     else:
         raise ValueError(f"unknown model: {model!r}")
     _PIPELINE_CACHE[key] = pipe
@@ -175,10 +129,10 @@ def handler(event):
         "prompt": str,
         "negative": str,
         "steps": int,           # default 30
-        "guidance": float,      # default 7.0 (SDXL default; 5.0 for PonyPlex)
+        "guidance": float,      # default 7.0 (SDXL default; works for both models)
         "width": int, "height": int,
         "seed": int,
-        "model": "sdxl-dark-ghibli" | "ponyplex",
+        "model": "sdxl-dark-ghibli" | "juggernaut-xl",
         "lora_scale": float,    # default 0.9 (SDXL+DG only)
       }
     Output:

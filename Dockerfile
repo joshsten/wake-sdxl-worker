@@ -1,11 +1,9 @@
 # Wake codex SDXL serverless worker (lean — models lazy-load at runtime).
 #
 # Image is ~3 GB compressed. First cold start downloads SDXL base (~7 GB)
-# and Dark Ghibli LoRA from /app (baked). PonyPlex (~6.5 GB) lazy-downloads
-# from CivitAI on first ponyplex request and caches to /workspace.
-#
-# Required endpoint env vars:
-#   CIVITAI_TOKEN — for downloading PonyPlex
+# from HuggingFace and reads the Dark Ghibli LoRA from /app (baked).
+# Juggernaut-XL v9 (~7 GB) lazy-downloads from RunDiffusion's HF mirror on
+# first juggernaut-xl request, cached to /workspace via HF_HOME.
 #
 # Recommended GPU: RTX A5000 24GB or RTX 4090 24GB.
 

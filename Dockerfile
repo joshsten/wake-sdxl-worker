@@ -76,13 +76,16 @@ ENTRYPOINT ["/usr/local/bin/wake-entrypoint.sh"]
 # literal multiline file would survive layering more cleanly but the env
 # form is easier to override per-endpoint (e.g., trim the manifest for a
 # light deployment that only needs SDXL).
-# Wave 1 manifest — fits in the 30 GB container disk (~28 GB models).
-# Z-Image-Turbo (~16 GB) deferred to wave 2 once the disk is bumped to 60 GB.
+# Full wave-1 manifest — Z-Image included; total ~44 GB against the
+# template's now-60 GB container disk.
 ENV WAKE_MODEL_MANIFEST="\
 hf|https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors|checkpoints/sdxl-base.safetensors|6800\n\
 hf|https://huggingface.co/RunDiffusion/Juggernaut-XL-v9/resolve/main/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors|checkpoints/juggernaut-xl-v9.safetensors|6800\n\
 hf|https://huggingface.co/OnomaAIResearch/Illustrious-xl-early-release-v0/resolve/main/Illustrious-XL-v0.1.safetensors|checkpoints/illustrious-xl.safetensors|6800\n\
 hf|https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors|vae/sdxl-vae-fp16-fix.safetensors|335\n\
+hf|https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors|text_encoders/qwen_3_4b.safetensors|4000\n\
+hf|https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors|diffusion_models/z_image_turbo_bf16.safetensors|12000\n\
+hf|https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors|vae/z-image-vae.safetensors|330\n\
 civitai|436407|checkpoints/ponyplex-v1.safetensors|6500\n\
 civitai|2405821|loras/happy-bright-odd-illustrious.safetensors|218\n\
 civitai|2574210|loras/cursed-fairytale-sdxl.safetensors|218\n\

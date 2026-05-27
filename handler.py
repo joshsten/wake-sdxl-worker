@@ -65,28 +65,25 @@ def _download_ponyplex():
     token = os.environ.get("CIVITAI_TOKEN", "")
     if not token:
         raise RuntimeError("CIVITAI_TOKEN env var not set on endpoint config")
-    # Two things were wrong in the original implementation:
-    #  1) CloudFlare in front of civitai.com 403s the default Python-urllib
-    #     User-Agent ("Python-urllib/3.10"). Send a browser-like UA instead.
-    #  2) Use ?token= query param, not Authorization: Bearer. The 307 redirect
-    #     to b2.civitai.com carries its own pre-signed auth — urllib forwards
-    #     headers across redirects, so a Bearer header reaches B2 and trips
-    #     its "duplicate auth" rejection.
+    # CloudFlare WAF in front of civitai.com blocks Python clients (urllib +
+    # requests) based on TLS fingerprint (JA3), regardless of User-Agent.
+    # Bot detection is more aggressive on datacenter IP ranges like RunPod's.
+    # curl works because its TLS handshake matches "real client" patterns.
+    # Shell out to curl rather than fight the WAF in Python.
     sep = "&" if "?" in PONYPLEX_DOWNLOAD_URL else "?"
     auth_url = f"{PONYPLEX_DOWNLOAD_URL}{sep}token={token}"
-    print(f"[handler] downloading PonyPlex from {PONYPLEX_DOWNLOAD_URL} …", flush=True)
-    import urllib.request
-    req = urllib.request.Request(
-        auth_url,
-        headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
-    )
+    print(f"[handler] downloading PonyPlex from {PONYPLEX_DOWNLOAD_URL} (via curl) …", flush=True)
     t0 = time.perf_counter()
-    with urllib.request.urlopen(req, timeout=600) as resp, open(PONYPLEX_CACHE, "wb") as out:
-        while True:
-            chunk = resp.read(1 << 20)
-            if not chunk:
-                break
-            out.write(chunk)
+    import subprocess
+    tmp = PONYPLEX_CACHE.with_suffix(".tmp")
+    result = subprocess.run(
+        ["curl", "-fsSL", "--retry", "3", "--retry-delay", "5",
+         "--max-time", "600", "-o", str(tmp), auth_url],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"curl failed (rc={result.returncode}): {result.stderr.strip()[:300]}")
+    tmp.replace(PONYPLEX_CACHE)
     size_gb = PONYPLEX_CACHE.stat().st_size / (1 << 30)
     print(f"[handler] PonyPlex downloaded ({size_gb:.1f} GB) in {time.perf_counter() - t0:.1f}s", flush=True)
 

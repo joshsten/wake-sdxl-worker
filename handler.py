@@ -121,17 +121,23 @@ def _load_sdxl_dark_ghibli(lora_scale: float):
 def _load_ponyplex():
     """PonyPlex single-file checkpoint. Pony-XL is SDXL-architecture.
 
-    from_single_file alone fails on newer transformers (4.46+) because the
-    Pony checkpoint stores text_encoder weights without the .text_model
-    nesting that the diffusers-default loader expects — symptom is
-    `'CLIPTextModel' object has no attribute 'text_model'`. Workaround:
-    construct the text encoders + tokenizers from the SDXL base repo, then
-    let from_single_file take only the UNet + VAE + scheduler from Pony.
+    Two compatibility gotchas:
+      1. from_single_file alone fails on newer transformers (4.46+) because
+         the Pony checkpoint stores text_encoder weights without the
+         .text_model nesting the diffusers loader expects — symptom is
+         `'CLIPTextModel' object has no attribute 'text_model'`. Workaround:
+         construct text_encoders + tokenizers from the SDXL base repo and
+         pass them in, so from_single_file only deals with UNet/VAE/scheduler.
+
+      2. The default SDXL VAE produces "colorful-noise mosaic" output when
+         run in fp16 (the latent decode overflows). Every Pony-derived
+         model needs the madebyollin/sdxl-vae-fp16-fix VAE instead, or the
+         output is undecodable mush regardless of prompt quality.
     """
-    from diffusers import StableDiffusionXLPipeline
+    from diffusers import StableDiffusionXLPipeline, AutoencoderKL
     from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
     _download_ponyplex()
-    print("[handler] loading PonyPlex (with SDXL-base text encoders) …", flush=True)
+    print("[handler] loading PonyPlex (SDXL-base text encoders + fp16-fix VAE) …", flush=True)
     t0 = time.perf_counter()
     BASE = "stabilityai/stable-diffusion-xl-base-1.0"
     text_encoder = CLIPTextModel.from_pretrained(
@@ -142,6 +148,9 @@ def _load_ponyplex():
     )
     tokenizer = CLIPTokenizer.from_pretrained(BASE, subfolder="tokenizer")
     tokenizer_2 = CLIPTokenizer.from_pretrained(BASE, subfolder="tokenizer_2")
+    vae = AutoencoderKL.from_pretrained(
+        "madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16,
+    )
     pipe = StableDiffusionXLPipeline.from_single_file(
         str(PONYPLEX_CACHE),
         torch_dtype=torch.float16,
@@ -150,6 +159,7 @@ def _load_ponyplex():
         text_encoder_2=text_encoder_2,
         tokenizer=tokenizer,
         tokenizer_2=tokenizer_2,
+        vae=vae,
     )
     pipe = pipe.to("cuda")
     pipe.enable_vae_slicing()

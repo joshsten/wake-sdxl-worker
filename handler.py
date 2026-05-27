@@ -65,17 +65,21 @@ def _download_ponyplex():
     token = os.environ.get("CIVITAI_TOKEN", "")
     if not token:
         raise RuntimeError("CIVITAI_TOKEN env var not set on endpoint config")
-    # Use ?token= query param, NOT Authorization: Bearer header. The civitai
-    # download endpoint returns a 307 redirect to b2.civitai.com which has
-    # its own pre-signed auth in the URL — Python's urllib forwards the
-    # original Authorization header on redirect, and B2 returns 403 when
-    # both auth signals are present. Query-param auth leaves the redirected
-    # URL clean.
+    # Two things were wrong in the original implementation:
+    #  1) CloudFlare in front of civitai.com 403s the default Python-urllib
+    #     User-Agent ("Python-urllib/3.10"). Send a browser-like UA instead.
+    #  2) Use ?token= query param, not Authorization: Bearer. The 307 redirect
+    #     to b2.civitai.com carries its own pre-signed auth — urllib forwards
+    #     headers across redirects, so a Bearer header reaches B2 and trips
+    #     its "duplicate auth" rejection.
     sep = "&" if "?" in PONYPLEX_DOWNLOAD_URL else "?"
     auth_url = f"{PONYPLEX_DOWNLOAD_URL}{sep}token={token}"
     print(f"[handler] downloading PonyPlex from {PONYPLEX_DOWNLOAD_URL} …", flush=True)
     import urllib.request
-    req = urllib.request.Request(auth_url)
+    req = urllib.request.Request(
+        auth_url,
+        headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
+    )
     t0 = time.perf_counter()
     with urllib.request.urlopen(req, timeout=600) as resp, open(PONYPLEX_CACHE, "wb") as out:
         while True:

@@ -31,6 +31,21 @@ COPY loras/dark-ghibli-fairytales.safetensors models/loras/dark-ghibli-fairytale
 COPY wake-init.sh /usr/local/bin/wake-init.sh
 RUN chmod +x /usr/local/bin/wake-init.sh
 
+# RunPod's serverless invocation seems to call /start.sh directly rather than
+# honoring the Dockerfile CMD, so a plain CMD wrapper gets bypassed and our
+# init never runs. Replace /start.sh with a wrapper that runs the init then
+# chains to the original entrypoint. This is the only reliable interception
+# point on the worker-comfyui base.
+RUN mv /start.sh /start.orig.sh && \
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        '# Wake codex wrapper — run model init, then defer to the parent worker-comfyui start.' \
+        'set -e' \
+        '/usr/local/bin/wake-init.sh' \
+        'exec /start.orig.sh "$@"' \
+    > /start.sh && \
+    chmod +x /start.sh
+
 # Manifest of remote models to fetch on first start, one per line:
 #   src|name-or-version|relative-target|expected-size-mb
 # src is "hf" for HuggingFace (URL is the name field) or "civitai" for
@@ -54,6 +69,5 @@ civitai|2574210|loras/cursed-fairytale-sdxl.safetensors|218\n\
 civitai|1578317|loras/digital-dystopia-illustrious.safetensors|109\
 "
 
-# Override the parent's CMD: run our init (downloads any missing models)
-# then exec the parent's start.sh.
-CMD ["/bin/bash", "-c", "/usr/local/bin/wake-init.sh && exec /start.sh"]
+# Leave the parent's CMD ["/start.sh"] alone — our /start.sh is the wrapper
+# now, so model init runs unconditionally before Comfy starts.

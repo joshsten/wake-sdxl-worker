@@ -119,16 +119,37 @@ def _load_sdxl_dark_ghibli(lora_scale: float):
 
 
 def _load_ponyplex():
-    """PonyPlex single-file checkpoint. Pony-XL is SDXL-architecture, so we
-    use from_single_file with the SDXL pipeline class."""
+    """PonyPlex single-file checkpoint. Pony-XL is SDXL-architecture.
+
+    from_single_file alone fails on newer transformers (4.46+) because the
+    Pony checkpoint stores text_encoder weights without the .text_model
+    nesting that the diffusers-default loader expects — symptom is
+    `'CLIPTextModel' object has no attribute 'text_model'`. Workaround:
+    construct the text encoders + tokenizers from the SDXL base repo, then
+    let from_single_file take only the UNet + VAE + scheduler from Pony.
+    """
     from diffusers import StableDiffusionXLPipeline
+    from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
     _download_ponyplex()
-    print("[handler] loading PonyPlex …", flush=True)
+    print("[handler] loading PonyPlex (with SDXL-base text encoders) …", flush=True)
     t0 = time.perf_counter()
+    BASE = "stabilityai/stable-diffusion-xl-base-1.0"
+    text_encoder = CLIPTextModel.from_pretrained(
+        BASE, subfolder="text_encoder", torch_dtype=torch.float16, variant="fp16",
+    )
+    text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+        BASE, subfolder="text_encoder_2", torch_dtype=torch.float16, variant="fp16",
+    )
+    tokenizer = CLIPTokenizer.from_pretrained(BASE, subfolder="tokenizer")
+    tokenizer_2 = CLIPTokenizer.from_pretrained(BASE, subfolder="tokenizer_2")
     pipe = StableDiffusionXLPipeline.from_single_file(
         str(PONYPLEX_CACHE),
         torch_dtype=torch.float16,
         use_safetensors=True,
+        text_encoder=text_encoder,
+        text_encoder_2=text_encoder_2,
+        tokenizer=tokenizer,
+        tokenizer_2=tokenizer_2,
     )
     pipe = pipe.to("cuda")
     pipe.enable_vae_slicing()

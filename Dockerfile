@@ -9,7 +9,7 @@
 #
 # Recommended GPU: RTX A5000 24GB or RTX 4090 24GB.
 
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -25,11 +25,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3.10 /usr/bin/python \
     && ln -sf /usr/bin/python3.10 /usr/bin/python3
 
-# PyTorch 2.7+ with CUDA 12.4 wheels — needed because RunPod's pool may
-# allocate a Blackwell-architecture GPU (sm_120) even when the endpoint
-# requests A5000/L4/3090. Pre-2.7 wheels only ship sm_50..sm_90 and crash
-# at CUDA init on Blackwell.
-RUN pip install --no-cache-dir torch==2.7.0 --index-url https://download.pytorch.org/whl/cu124
+# PyTorch built against CUDA 12.8 — Blackwell (sm_120) support landed in
+# torch 2.7+ and only the cu128 wheel channel ships sm_120 kernels. RunPod's
+# pool may allocate RTX PRO 6000 Blackwell MIG slices even when the endpoint
+# requests A5000/L4/3090, so we need the broadest possible kernel coverage.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu128
 
 WORKDIR /app
 

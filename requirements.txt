@@ -1,6 +1,10 @@
 runpod>=1.7.0
-diffusers>=0.31.0
-transformers>=4.45.0
+# transformers 4.50+ refactored CLIPTextModel to drop the .text_model
+# inner module; diffusers SDXL from_single_file still indexes by .text_model
+# and crashes with "'CLIPTextModel' object has no attribute 'text_model'".
+# Pin to a combination that was tested together.
+diffusers==0.31.0
+transformers==4.46.3
 accelerate>=1.0.0
 safetensors>=0.4.5
 Pillow>=10.0.0

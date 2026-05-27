@@ -31,20 +31,41 @@ COPY loras/dark-ghibli-fairytales.safetensors models/loras/dark-ghibli-fairytale
 COPY wake-init.sh /usr/local/bin/wake-init.sh
 RUN chmod +x /usr/local/bin/wake-init.sh
 
-# RunPod's serverless invocation seems to call /start.sh directly rather than
-# honoring the Dockerfile CMD, so a plain CMD wrapper gets bypassed and our
-# init never runs. Replace /start.sh with a wrapper that runs the init then
-# chains to the original entrypoint. This is the only reliable interception
-# point on the worker-comfyui base.
+# Belt-and-suspenders init hook: install at BOTH points where RunPod might
+# invoke the worker — /start.sh (the Dockerfile CMD target) and an ENTRYPOINT
+# we'll declare below. Whichever one fires first runs the init; the other
+# becomes a no-op via the marker file.
+#
+# Prior attempt with just CMD ["/start.sh"] override never ran the init,
+# suggesting RunPod's serverless framework dispatches through ENTRYPOINT or
+# some custom invocation that skips CMD entirely.
+
+# Replace /start.sh with a wrapper. Loud echos so worker logs show whether
+# the hook fired.
 RUN mv /start.sh /start.orig.sh && \
     printf '%s\n' \
         '#!/usr/bin/env bash' \
-        '# Wake codex wrapper — run model init, then defer to the parent worker-comfyui start.' \
-        'set -e' \
-        '/usr/local/bin/wake-init.sh' \
+        'echo "[wake-start] /start.sh wrapper invoked"' \
+        '/usr/local/bin/wake-init.sh || echo "[wake-start] init failed (rc=$?), continuing"' \
+        'echo "[wake-start] exec /start.orig.sh"' \
         'exec /start.orig.sh "$@"' \
     > /start.sh && \
     chmod +x /start.sh
+
+# Independent ENTRYPOINT wrapper — runs the init once via a marker, then
+# delegates to whatever command argument follows.
+RUN printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'echo "[wake-entry] ENTRYPOINT wrapper invoked"' \
+        'if [[ ! -f /tmp/wake-init.done ]]; then' \
+        '  /usr/local/bin/wake-init.sh && touch /tmp/wake-init.done' \
+        'fi' \
+        'echo "[wake-entry] exec $@"' \
+        'exec "$@"' \
+    > /usr/local/bin/wake-entrypoint.sh && \
+    chmod +x /usr/local/bin/wake-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/wake-entrypoint.sh"]
 
 # Manifest of remote models to fetch on first start, one per line:
 #   src|name-or-version|relative-target|expected-size-mb
@@ -55,14 +76,13 @@ RUN mv /start.sh /start.orig.sh && \
 # literal multiline file would survive layering more cleanly but the env
 # form is easier to override per-endpoint (e.g., trim the manifest for a
 # light deployment that only needs SDXL).
+# Wave 1 manifest — fits in the 30 GB container disk (~28 GB models).
+# Z-Image-Turbo (~16 GB) deferred to wave 2 once the disk is bumped to 60 GB.
 ENV WAKE_MODEL_MANIFEST="\
 hf|https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors|checkpoints/sdxl-base.safetensors|6800\n\
 hf|https://huggingface.co/RunDiffusion/Juggernaut-XL-v9/resolve/main/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors|checkpoints/juggernaut-xl-v9.safetensors|6800\n\
 hf|https://huggingface.co/OnomaAIResearch/Illustrious-xl-early-release-v0/resolve/main/Illustrious-XL-v0.1.safetensors|checkpoints/illustrious-xl.safetensors|6800\n\
 hf|https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors|vae/sdxl-vae-fp16-fix.safetensors|335\n\
-hf|https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors|text_encoders/qwen_3_4b.safetensors|4000\n\
-hf|https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors|diffusion_models/z_image_turbo_bf16.safetensors|12000\n\
-hf|https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors|vae/z-image-vae.safetensors|330\n\
 civitai|436407|checkpoints/ponyplex-v1.safetensors|6500\n\
 civitai|2405821|loras/happy-bright-odd-illustrious.safetensors|218\n\
 civitai|2574210|loras/cursed-fairytale-sdxl.safetensors|218\n\

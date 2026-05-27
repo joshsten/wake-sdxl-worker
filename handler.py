@@ -202,6 +202,9 @@ def _load_illustrious_hbo():
     try:
         state_dict = _read_lora_with_synthetic_alphas(HBO_LORA_CACHE)
         pipe.load_lora_weights(state_dict)
+        # The default LoRA scale is held on the pipeline and overridden per-call
+        # via cross_attention_kwargs={"scale": ...} in handler(). Store at 1.0
+        # as the baseline; the inference path will apply the per-request value.
         try:
             pipe.set_adapters(["default_0"], adapter_weights=[1.0])
         except Exception:
@@ -304,8 +307,13 @@ def handler(event):
         if "clip_skip" in inp:
             clip_skip = int(inp["clip_skip"])
         elif model in ("ponyplex", "illustrious-hbo"):
-            # Pony + Illustrious lineages were both trained with CLIP-skip 2.
-            clip_skip = 2
+            # Pony + Illustrious lineages were both trained with what Comfy
+            # / Auto1111 call "CLIP-skip 2", which in diffusers' nomenclature
+            # is clip_skip=1 (skip the LAST layer, use the penultimate).
+            # The two libraries' indexing is offset by one. Earlier passes
+            # used clip_skip=2 here, which in diffusers means "skip 2 layers"
+            # — wrong, and explains the greenish-cloud failure.
+            clip_skip = 1
         else:
             clip_skip = None
 
@@ -327,6 +335,11 @@ def handler(event):
         )
         if clip_skip is not None:
             call_kwargs["clip_skip"] = clip_skip
+        # For illustrious-hbo, the lora_scale input controls how strongly the
+        # Happy Bright Odd LoRA contributes to inference. 0 disables it (useful
+        # for validating the base alone), 1.0 is default, ~0.5 dampens it.
+        if model == "illustrious-hbo":
+            call_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
 
         t0 = time.perf_counter()
         result = pipe(**call_kwargs)

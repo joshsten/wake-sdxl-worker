@@ -38,8 +38,11 @@ RUN wget -q -O models/checkpoints/juggernaut-xl-v9.safetensors \
 RUN wget -q -O models/checkpoints/illustrious-xl.safetensors \
         https://huggingface.co/OnomaAIResearch/Illustrious-xl-early-release-v0/resolve/main/Illustrious-XL-v0.1.safetensors
 
-# Dark Ghibli LoRA — small + stable, baked from the repo.
+# Small LoRAs baked from the repo. (CivitAI runtime downloads aren't reachable
+# because RunPod's serverless invocation bypasses Docker CMD/ENTRYPOINT, so
+# anything we need at runtime has to be on disk by the time the image starts.)
 COPY loras/dark-ghibli-fairytales.safetensors models/loras/dark-ghibli-fairytales.safetensors
+COPY loras/happy-bright-odd-illustrious.safetensors models/loras/happy-bright-odd-illustrious.safetensors
 
 # Parent's CMD (which serverless ignores anyway) and its handler.py stay as-is.
 # No model-init hook needed: everything is already on disk.

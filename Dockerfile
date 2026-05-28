@@ -42,17 +42,26 @@ RUN wget -q -O models/checkpoints/illustrious-xl.safetensors \
 # single-file limit so it travels as a regular blob, no LFS gymnastics.
 COPY loras/dark-ghibli-fairytales.safetensors models/loras/dark-ghibli-fairytales.safetensors
 
-# Happy Bright Odd LoRA (218 MB) is too big for a regular GitHub blob and
-# RunPod's CI doesn't pull git-lfs objects (we tried — they end up as
-# pointer text files that Comfy's LoraLoader fails to parse). Download it
-# directly from CivitAI at build time with the token. The token has been
-# shared through the build pipeline already and can be rotated server-side
-# if compromised. ARG override lets us swap tokens without code edits.
-ARG CIVITAI_TOKEN=b401f1141a02310cad754869322fa0d4
-RUN curl -fsSL --retry 3 --retry-delay 5 --max-time 600 \
+# Happy Bright Odd LoRA (218 MB) too big for a regular GitHub blob,
+# RunPod CI can't pull git-lfs, and CivitAI's CloudFlare WAF rejects
+# datacenter IPs (a build curl from there yielded an HTML challenge
+# page that Comfy then tried to parse as safetensors → JSON decode
+# error). Fix: host the file as a GitHub Release asset on this same
+# repo. Release assets sit on release-assets.githubusercontent.com,
+# which is a fast public CDN with no WAF interception. Verify the
+# downloaded bytes look like a safetensors header so we catch a bad
+# fetch at build time instead of at first inference.
+RUN curl -fL --retry 3 --retry-delay 5 --max-time 600 \
     -o models/loras/happy-bright-odd-illustrious.safetensors \
-    "https://civitai.com/api/download/models/2405821?token=${CIVITAI_TOKEN}" && \
-    ls -lh models/loras/happy-bright-odd-illustrious.safetensors
+    "https://github.com/joshsten/wake-sdxl-worker/releases/download/wake-loras-v1/hbo-backup.safetensors" && \
+    ls -lh models/loras/happy-bright-odd-illustrious.safetensors && \
+    # Sanity check: safetensors files start with an 8-byte little-endian
+    # header length followed by JSON. The first ~16 bytes should NOT look
+    # like ASCII HTML ("<htm" or "<!DO"). Fail the build loudly if so.
+    head -c 16 models/loras/happy-bright-odd-illustrious.safetensors | xxd && \
+    if head -c 4 models/loras/happy-bright-odd-illustrious.safetensors | grep -q "<"; then \
+        echo "ERROR: LoRA download looks like HTML, not safetensors" >&2; exit 1; \
+    fi
 
 # Parent's CMD (which serverless ignores anyway) and its handler.py stay as-is.
 # No model-init hook needed: everything is already on disk.

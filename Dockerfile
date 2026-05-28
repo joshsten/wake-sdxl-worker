@@ -51,12 +51,10 @@ COPY loras/dark-ghibli-fairytales.safetensors models/loras/dark-ghibli-fairytale
 # which is a fast public CDN with no WAF interception. Verify the
 # downloaded bytes look like a safetensors header so we catch a bad
 # fetch at build time instead of at first inference.
-# Inline-comment-free single line — multi-line RUN with embedded `#` lines
-# was getting Docker's parser confused (exit 127 even though every command
-# was present). Keep the chain to just curl + ls so the build either
-# downloads the LoRA or fails loudly. If the file ends up HTML, Comfy's
-# LoraLoader will catch it at first inference and we'll see it in worker logs.
-RUN curl -fL --retry 3 --retry-delay 5 --max-time 600 -o models/loras/happy-bright-odd-illustrious.safetensors "https://github.com/joshsten/wake-sdxl-worker/releases/download/wake-loras-v1/hbo-backup.safetensors" && ls -lh models/loras/happy-bright-odd-illustrious.safetensors
+# Use wget rather than curl — the worker-comfyui base image has wget
+# preinstalled (it's what their own Dockerfile uses for model downloads)
+# but not curl, which was the cause of every prior build's exit 127.
+RUN wget -q --tries=3 --timeout=600 -O models/loras/happy-bright-odd-illustrious.safetensors "https://github.com/joshsten/wake-sdxl-worker/releases/download/wake-loras-v1/hbo-backup.safetensors" && ls -lh models/loras/happy-bright-odd-illustrious.safetensors
 
 # Parent's CMD (which serverless ignores anyway) and its handler.py stay as-is.
 # No model-init hook needed: everything is already on disk.

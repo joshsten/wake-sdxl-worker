@@ -38,6 +38,12 @@ RUN wget -q -O models/checkpoints/juggernaut-xl-v9.safetensors \
 RUN wget -q -O models/checkpoints/illustrious-xl.safetensors \
         https://huggingface.co/OnomaAIResearch/Illustrious-xl-early-release-v0/resolve/main/Illustrious-XL-v0.1.safetensors
 
+# DreamShaper XL Turbo v2.1 — modern painted fantasy register (MTG / D&D 5e
+# splash-art feel). Turbo variant: 6–8 steps at CFG 2, much faster inference
+# than the SDXL base checkpoints, distilled for vivid composition.
+RUN wget -q -O models/checkpoints/dreamshaper-xl-turbo-v2-1.safetensors \
+        https://huggingface.co/Lykon/dreamshaper-xl-v2-turbo/resolve/main/DreamShaperXL_Turbo_v2_1.safetensors
+
 # Dark Ghibli (82 MB) baked from the repo — fits under GitHub's 100 MB
 # single-file limit so it travels as a regular blob, no LFS gymnastics.
 COPY loras/dark-ghibli-fairytales.safetensors models/loras/dark-ghibli-fairytales.safetensors

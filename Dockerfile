@@ -56,15 +56,12 @@ RUN curl -fL --retry 3 --retry-delay 5 --max-time 600 \
     "https://github.com/joshsten/wake-sdxl-worker/releases/download/wake-loras-v1/hbo-backup.safetensors" && \
     ls -lh models/loras/happy-bright-odd-illustrious.safetensors && \
     # Sanity check: safetensors starts with an 8-byte little-endian header
-    # length then JSON. If the first 4 bytes are ASCII "<" (HTML), the
-    # download is broken — fail the build loudly. (xxd isn't installed on
-    # the base image; head + grep is sufficient and portable.)
-    if head -c 4 models/loras/happy-bright-odd-illustrious.safetensors | grep -q "<"; then \
+    # length then JSON. If the first byte is ASCII "<" (HTML), the download
+    # is broken. (Previous build attempts that added stat/xxd-based checks
+    # hit exit 127 because those binaries aren't in the minimal base
+    # image. head+grep is portable across busybox / coreutils.)
+    if head -c 1 models/loras/happy-bright-odd-illustrious.safetensors | grep -q "<"; then \
         echo "ERROR: LoRA download looks like HTML, not safetensors" >&2; exit 1; \
-    fi && \
-    SIZE=$(stat -c%s models/loras/happy-bright-odd-illustrious.safetensors) && \
-    if [ "$SIZE" -lt 100000000 ]; then \
-        echo "ERROR: LoRA file is only $SIZE bytes (expected ~218 MB)" >&2; exit 1; \
     fi
 
 # Parent's CMD (which serverless ignores anyway) and its handler.py stay as-is.

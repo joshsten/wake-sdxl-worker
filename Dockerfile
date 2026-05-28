@@ -38,11 +38,21 @@ RUN wget -q -O models/checkpoints/juggernaut-xl-v9.safetensors \
 RUN wget -q -O models/checkpoints/illustrious-xl.safetensors \
         https://huggingface.co/OnomaAIResearch/Illustrious-xl-early-release-v0/resolve/main/Illustrious-XL-v0.1.safetensors
 
-# Small LoRAs baked from the repo. (CivitAI runtime downloads aren't reachable
-# because RunPod's serverless invocation bypasses Docker CMD/ENTRYPOINT, so
-# anything we need at runtime has to be on disk by the time the image starts.)
+# Dark Ghibli (82 MB) baked from the repo — fits under GitHub's 100 MB
+# single-file limit so it travels as a regular blob, no LFS gymnastics.
 COPY loras/dark-ghibli-fairytales.safetensors models/loras/dark-ghibli-fairytales.safetensors
-COPY loras/happy-bright-odd-illustrious.safetensors models/loras/happy-bright-odd-illustrious.safetensors
+
+# Happy Bright Odd LoRA (218 MB) is too big for a regular GitHub blob and
+# RunPod's CI doesn't pull git-lfs objects (we tried — they end up as
+# pointer text files that Comfy's LoraLoader fails to parse). Download it
+# directly from CivitAI at build time with the token. The token has been
+# shared through the build pipeline already and can be rotated server-side
+# if compromised. ARG override lets us swap tokens without code edits.
+ARG CIVITAI_TOKEN=b401f1141a02310cad754869322fa0d4
+RUN curl -fsSL --retry 3 --retry-delay 5 --max-time 600 \
+    -o models/loras/happy-bright-odd-illustrious.safetensors \
+    "https://civitai.com/api/download/models/2405821?token=${CIVITAI_TOKEN}" && \
+    ls -lh models/loras/happy-bright-odd-illustrious.safetensors
 
 # Parent's CMD (which serverless ignores anyway) and its handler.py stay as-is.
 # No model-init hook needed: everything is already on disk.

@@ -62,5 +62,21 @@ COPY loras/dark-ghibli-fairytales.safetensors models/loras/dark-ghibli-fairytale
 # but not curl, which was the cause of every prior build's exit 127.
 RUN wget -q --tries=3 --timeout=600 -O models/loras/happy-bright-odd-illustrious.safetensors "https://github.com/joshsten/wake-sdxl-worker/releases/download/wake-loras-v1/hbo-backup.safetensors" && ls -lh models/loras/happy-bright-odd-illustrious.safetensors
 
+# ── ControlNet (structure guidance) ──────────────────────────────────────────
+# SDXL Canny ControlNet (xinsir, ~2.5 GB) into /comfyui/models/controlnet/ so
+# ComfyUI's stock ControlNetLoader can use it. The viewer's Image Forge extracts
+# the Canny edge map LOCALLY and ships it as the control image, so NO
+# comfyui_controlnet_aux preprocessor nodes are needed here — just the model.
+# Filename must match workflows.py CONTROLNETS["canny"]. HF resolve URLs work
+# from RunPod CI (unlike CivitAI's WAF); size-check guards against a bad fetch.
+# Only Canny for now to stay well under the build-time/layer cap; depth/openpose/
+# scribble can be added as further RUN layers (or via the wave-2 network volume)
+# when needed.
+RUN mkdir -p models/controlnet && \
+    wget -q --tries=3 --timeout=900 -O models/controlnet/controlnet-canny-sdxl-1.0.safetensors \
+        "https://huggingface.co/xinsir/controlnet-canny-sdxl-1.0/resolve/main/diffusion_pytorch_model.safetensors" && \
+    [ "$(stat -c%s models/controlnet/controlnet-canny-sdxl-1.0.safetensors)" -gt 1000000000 ] && \
+    ls -lh models/controlnet/controlnet-canny-sdxl-1.0.safetensors
+
 # Parent's CMD (which serverless ignores anyway) and its handler.py stay as-is.
 # No model-init hook needed: everything is already on disk.
